@@ -17,7 +17,7 @@ import Data.Kind (Type)
 import Test.HUnit (Test, (~?=))
 
 {-
-*Generalized Algebraic Datatypes*, or GADTs, are one of GHC's more unusual
+\*Generalized Algebraic Datatypes*, or GADTs, are one of GHC's more unusual
 extensions to Haskell.  In this module, we'll introduce GADTs and related
 features of GHC's type system.
 
@@ -64,17 +64,24 @@ oevaluate = go
         (Just (Left i1), Just (Left i2)) -> Just (Left (i1 + i2))
         _ -> Nothing
     go (OIsZero e1) =
-      undefined
+      case go e1 of
+        Just (Left 0) -> Just (Right True)
+        Just (Right False) -> Just (Right True)
+        _ -> Just (Right False)
     go (OIf e1 e2 e3) =
-      undefined
+      case go e1 of
+        Just (Right True) -> go e2
+        _ -> go e3
 
 {-
 Ugh. That Maybe/Either combination is awkward.
 -}
 
 -- >>> oevaluate oe1
+-- Just (Left 4)
 
 -- >>> oevaluate oe2
+-- Just (Left 3)
 
 {-
 Plus, this language admits some strange terms:
@@ -89,6 +96,7 @@ bad_oe2 :: OExp
 bad_oe2 = OIf (OInt 1) (OBool True) (OInt 3)
 
 -- >>> oevaluate bad_oe1
+-- Nothing
 
 -- >>> oevaluate bad_oe2
 
@@ -164,9 +172,10 @@ evaluate = go
     go (GBool b) = b
     go (GAdd e1 e2) = go e1 + go e2
     go (GIsZero e1) =
-      undefined
-    go (GIf e1 e2 e3) =
-      undefined
+      case go e1 of
+        0 -> True
+        _ -> False
+    go (GIf e1 e2 e3) = if go e1 then go e2 else go e3
 
 {-
 Not only that, our evaluator is more efficient [1] because it does not need to
@@ -234,7 +243,7 @@ data List :: Flag -> Type -> Type where
   Nil :: List Empty a
   Cons :: a -> List f a -> List NonEmpty a
 
-deriving instance Show a => Show (List f a)
+deriving instance (Show a) => Show (List f a)
 
 {-
 Analogously, the type of `Cons` reflects that it creates a
@@ -266,6 +275,7 @@ safeHd :: List NonEmpty a -> a
 safeHd (Cons h _) = h
 
 -- >>> safeHd ex1
+-- 1
 
 -- >>> safeHd ex0
 
@@ -276,8 +286,8 @@ allowed!)
 Compare this definition to the unsafe version of head.
 -}
 
---unsafeHd :: [a] -> a
---unsafeHd (x : _) = x
+-- unsafeHd :: [a] -> a
+-- unsafeHd (x : _) = x
 
 -- >>> unsafeHd [1,2]
 
@@ -289,7 +299,8 @@ functions. For example, `foldr` works for both empty and nonempty lists.
 -}
 
 foldr' :: (a -> b -> b) -> b -> List f a -> b
-foldr' = undefined
+foldr' _ b Nil = b
+foldr' f b (Cons x xs) = f x (foldr' f b xs)
 
 {-
 But the `foldr1` variant (which assumes that the list is nonempty and
@@ -298,7 +309,8 @@ nonempty.
 -}
 
 foldr1' :: (a -> a -> a) -> List NonEmpty a -> a
-foldr1' = undefined
+foldr1' _ (Cons x Nil) = x
+foldr1' f (Cons x (Cons y ys)) = f x (foldr1' f (Cons y ys))
 
 {-
 The type of `map` becomes stronger in an interesting way: It says that
@@ -309,7 +321,8 @@ type check. (Though, sadly, it would still type check if we had two
 -}
 
 map' :: (a -> b) -> List f a -> List f b
-map' = undefined
+map' f Nil = Nil
+map' f (Cons x xs) = Cons (f x) (map' f xs)
 
 {-
 For `filter`, we don't know whether the output list will be empty or
@@ -338,15 +351,22 @@ The solution is to hide the size flag in an auxiliary datatype
 data OldList :: Type -> Type where
   OL :: List f a -> OldList a
 
-deriving instance Show a => Show (OldList a)
+deriving instance (Show a) => Show (OldList a)
 
 {-
 To go in the other direction -- from `OldList` to `List` -- we just
 use pattern matching.  For example:
 -}
 
+myOldList1 :: OldList Int
+myOldList1 = OL Nil
+
+myOldList2 :: OldList Int
+myOldList2 = OL (Cons 1 Nil)
+
 isNonempty :: OldList a -> Maybe (List NonEmpty a)
-isNonempty = undefined
+isNonempty (OL Nil) = Nothing
+isNonempty (OL (Cons x xs)) = Just (Cons x xs)
 
 {-
 Now we can use `OldList` as the result of `filter'`, with a bit of
@@ -354,7 +374,9 @@ additional pattern matching.
 -}
 
 filter' :: (a -> Bool) -> List f a -> OldList a
-filter' = undefined
+filter' f Nil = OL Nil
+filter' f (Cons x Nil) = if f x then OL (Cons x Nil) else OL Nil
+filter' f (Cons x (Cons y ys)) = if f x then OL (Cons x (Cons y ys)) else OL (Cons y ys)
 
 -- >>> filter' (== 2) (Cons 1 (Cons 2 (Cons 3 Nil)))
 -- OL (Cons 2 Nil)
