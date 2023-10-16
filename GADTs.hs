@@ -65,16 +65,18 @@ oevaluate = go
         _ -> Nothing
     go (OIsZero e1) =
       case go e1 of
-        Just (Left 0) -> Just (Right True)
-        Just (Right False) -> Just (Right True)
-        _ -> Just (Right False)
+        Just (Left i) -> Just (Right (i == 0))
+        Just (Right b1) -> Nothing
+        Nothing -> Nothing
     go (OIf e1 e2 e3) =
       case go e1 of
-        Just (Right True) -> go e2
-        _ -> go e3
+        Just (Right b) -> if b then go e1 else go e2
+        _ -> Nothing
 
 {-
 Ugh. That Maybe/Either combination is awkward.
+这边有两个问题，第一个问题是我们似乎需要同一个函数返回两种不同的类型
+另一个问题是，我们似乎不希望某些类型参与运算，比如我们不想让整数和bool相加
 -}
 
 -- >>> oevaluate oe1
@@ -99,6 +101,7 @@ bad_oe2 = OIf (OInt 1) (OBool True) (OInt 3)
 -- Nothing
 
 -- >>> oevaluate bad_oe2
+-- Just (Left 3)
 
 {-
 A Typed Expression Evaluator
@@ -171,10 +174,7 @@ evaluate = go
     go (GInt i) = i
     go (GBool b) = b
     go (GAdd e1 e2) = go e1 + go e2
-    go (GIsZero e1) =
-      case go e1 of
-        0 -> True
-        _ -> False
+    go (GIsZero e1) = go e1 == 0
     go (GIf e1 e2 e3) = if go e1 then go e2 else go e3
 
 {-
@@ -196,7 +196,9 @@ We can write this kind right before our type definition.
 -}
 
 type T :: (Type -> Type) -> Type
-data T a = MkT (a Int)
+-- data T a = MkT (a Int)
+data T a where
+  MkT :: (a Int) -> T a
 
 {-
 The `DataKinds` extension of GHC allows us to use _datatypes_ as kinds.
@@ -240,8 +242,8 @@ that the list is empty.
 -}
 
 data List :: Flag -> Type -> Type where
-  Nil :: List Empty a
-  Cons :: a -> List f a -> List NonEmpty a
+  Nil :: List 'Empty a
+  Cons :: a -> List f a -> List 'NonEmpty a
 
 deriving instance (Show a) => Show (List f a)
 
@@ -257,6 +259,28 @@ the _type_ expression `List Empty a`.
 
 (What we're seeing is a simple form of _dependent types_, where values
 are allowed to appear at the type level.)
+-}
+
+{-
+  仅仅通过查看数据的“类型”，即 type，就可以知道这个list是不是空
+  也就是说对于那些必须接受非空列表运算的函数，也许可以在 compile time
+  就发现问题。
+
+  注意：
+
+  ex2 :: forall f. List f Int
+  ex2 = Nil
+
+  会有compile time error
+  但是
+
+  ex3 :: exits f. List f Int
+  ex3 = Nil
+
+  也许可以。但是 Haskell 并没有这个 feature
+
+  如果我们想表达：我们不知道具体是哪个flag但是肯定有一个flag的值
+  可以查看 OldList
 -}
 
 ex0 :: List 'Empty Int
@@ -320,6 +344,24 @@ type check. (Though, sadly, it would still type check if we had two
 `Cons`es instead of one.)
 -}
 
+{-
+下面的代码会 type check，因为函数的 type 并不禁止这种 implementation
+但是这种实现对于下面的 map’ 行不通，因为从 type 层面就禁止了
+-- mapBad :: (a -> b) -> [a] -> [b]
+-- mapBad f xs = []
+
+  神奇的是下面这个实现也被禁止了，因为你不知道 xs 是不是空，所以也就不知道 map' f xs
+  是不是空。我们必须保证第二个case的结果在 compile time 是非空
+-- mapBad' :: (a -> b) -> List f a -> List f a
+-- mapBad' f Nil = Nil
+-- mapBad' f (Cons x xs) = map' f xs
+
+  只是提一嘴，我们甚至可以把列表的长度 builtin 进 type里面，以此来避免下面的实现：
+map' :: (a -> b) -> List f a -> List f b
+map' f Nil = Nil
+map' f (Cons x xs) = Cons (f x) (Cons (f x) (map' f xs))
+-}
+
 map' :: (a -> b) -> List f a -> List f b
 map' f Nil = Nil
 map' f (Cons x xs) = Cons (f x) (map' f xs)
@@ -353,6 +395,10 @@ data OldList :: Type -> Type where
 
 deriving instance (Show a) => Show (OldList a)
 
+toList :: OldList a -> [a]
+toList (OL Nil) = []
+toList (OL (Cons x xs)) = x : toList (OL xs)
+
 {-
 To go in the other direction -- from `OldList` to `List` -- we just
 use pattern matching.  For example:
@@ -368,6 +414,10 @@ isNonempty :: OldList a -> Maybe (List NonEmpty a)
 isNonempty (OL Nil) = Nothing
 isNonempty (OL (Cons x xs)) = Just (Cons x xs)
 
+-- 下面这个定义却行不通
+-- isNonempty' :: OldList a -> List f a
+-- isNonempty' (OL l) = l
+
 {-
 Now we can use `OldList` as the result of `filter'`, with a bit of
 additional pattern matching.
@@ -377,6 +427,14 @@ filter' :: (a -> Bool) -> List f a -> OldList a
 filter' f Nil = OL Nil
 filter' f (Cons x Nil) = if f x then OL (Cons x Nil) else OL Nil
 filter' f (Cons x (Cons y ys)) = if f x then OL (Cons x (Cons y ys)) else OL (Cons y ys)
+
+filter'' :: (a -> Bool) -> List f a -> OldList a
+filter'' f Nil = OL Nil
+filter'' f (Cons x xs) = if f x then
+  case filter'' f xs of
+    OL xs' -> OL (Cons x xs')
+  else filter'' f xs
+
 
 -- >>> filter' (== 2) (Cons 1 (Cons 2 (Cons 3 Nil)))
 -- OL (Cons 2 Nil)
